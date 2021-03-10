@@ -20,6 +20,7 @@ import org.apache.calcite.adapter.enumerable.EnumerableMergeJoin;
 import org.apache.calcite.config.CalciteSystemProperty;
 import org.apache.calcite.linq4j.tree.Types;
 import org.apache.calcite.plan.RelOptCluster;
+import org.apache.calcite.plan.RelOptCost;
 import org.apache.calcite.plan.RelOptPlanner;
 import org.apache.calcite.plan.RelOptPredicateList;
 import org.apache.calcite.plan.RelOptTable;
@@ -28,6 +29,7 @@ import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.plan.hep.HepPlanner;
 import org.apache.calcite.plan.hep.HepProgram;
 import org.apache.calcite.plan.hep.HepProgramBuilder;
+import org.apache.calcite.plan.volcano.VolcanoPlanner;
 import org.apache.calcite.rel.RelCollation;
 import org.apache.calcite.rel.RelCollationTraitDef;
 import org.apache.calcite.rel.RelCollations;
@@ -91,6 +93,7 @@ import org.apache.calcite.rex.RexProgram;
 import org.apache.calcite.rex.RexTableInputRef;
 import org.apache.calcite.rex.RexTableInputRef.RelTableRef;
 import org.apache.calcite.runtime.SqlFunctions;
+import org.apache.calcite.sql.SqlExplainLevel;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.SqlOperator;
 import org.apache.calcite.sql.SqlSpecialOperator;
@@ -3411,5 +3414,43 @@ public class RelMetadataTest extends SqlToRelTestBase {
     assertThat(columnOrigin.getOriginColumnOrdinal(), equalTo(5));
     assertThat(columnOrigin.getOriginTable().getRowType().getFieldNames().get(5),
         equalTo("SAL"));
+  }
+
+  @Test void testSortCpuCostOffsetLimit() {
+    final String sql = "select * from emp order by ename limit 5 offset 5";
+    double cpuCost = EMP_SIZE * Math.log(10);
+    checkCpuCost(sql, cpuCost, "offset + fetch smaller than table size "
+        + "=> cpu cost should be: input_size * log(offset + fetch) * field_collation_size");
+  }
+
+  @Test void testSortCpuCostLimit() {
+    final String sql = "select * from emp limit 10";
+    checkCpuCost(sql, 0d, "no order by clause => cpu cost should be 0");
+  }
+
+  @Test void testSortCpuCostLimit0() {
+    final String sql = "select * from emp order by ename limit 0";
+    checkCpuCost(sql, 0d, "fetch zero => cpu cost should be 0");
+  }
+
+  @Test void testSortCpuCostLargeLimit() {
+    final String sql = "select * from emp order by ename limit 10000";
+    double cpuCost = EMP_SIZE * Math.log(EMP_SIZE);
+    checkCpuCost(sql, cpuCost, "sort limit exceeds table size "
+        + "=> cpu cost should be dominated by table size");
+  }
+
+  private void checkCpuCost(String sql, double expected, String reason) {
+    RelNode rel = convertSql(sql);
+    RelOptCost cost = computeRelSelfCost(rel);
+    final double result = cost.getCpu();
+    assertEquals(expected, result, () -> reason + "\nsql:" + sql + "\nplan:"
+        + RelOptUtil.toString(rel, SqlExplainLevel.ALL_ATTRIBUTES));
+  }
+
+  private static RelOptCost computeRelSelfCost(RelNode rel) {
+    final RelMetadataQuery mq = rel.getCluster().getMetadataQuery();
+    RelOptPlanner planner = new VolcanoPlanner();
+    return rel.computeSelfCost(planner, mq);
   }
 }
